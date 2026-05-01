@@ -1,173 +1,166 @@
 """
 ================================================================================
-  EduMetrics Simulator — db_writer.py  v2
+  EduMetrics Simulator — db_writer2.py  v4
 
-  Rewrites v1 to support the full 4-year BTech structure:
+  Designed around a realistic 2-semester simulation of 4 concurrent classes
+  (40 students each).  Every behaviour rule is modelled as a concrete mechanism,
+  not just noise.
 
-  ── Structure ────────────────────────────────────────────────────────────────
-  4 classes running concurrently, one per year of study:
-    • 1st Year  → Semester 1 (odd) + Semester 2 (even)
-    • 2nd Year  → Semester 3 (odd) + Semester 4 (even)
-    • 3rd Year  → Semester 5 (odd) + Semester 6 (even)
-    • 4th Year  → Semester 7 (odd) + Semester 8 (even)
+  ── DESIGN PRINCIPLES (from spec) ────────────────────────────────────────────
 
-  Each class has 40 students.
+  1.  FIRST-YEAR ADJUSTMENT CURVE
+      Y1 students in sem 1 carry an "adjustment penalty" that varies per student.
+      Some struggle (penalty −8 to −18 on score/quality), some adapt fine (+2),
+      some hit the ground running if they have prior knowledge (+5 to +12).
+      In sem 2 the penalty fully resolves — so sem2 may be better OR worse
+      depending on whether that student's sem1 was already boosted.
 
-  ── Timeline ─────────────────────────────────────────────────────────────────
-  36 weeks total per academic cycle = 2 semesters × 18 weeks each.
+  2.  MIDTERM vs ENDTERM BIAS
+      Each student has a personal exam_bias drawn from their trait_seed.
+      Positive = endterm specialist (peaks late).  Negative = midterm specialist.
+      Applied as ±0 to ±12 pts on the respective exam type.
 
-  Odd semester  (1,3,5,7): starts first Monday of August,
-                            ends   ~third week of December
-  Even semester (2,4,6,8): starts first Monday of January,
-                            ends   ~third week of May
+  3.  MOST PEOPLE AROUND 80-85% ATTENDANCE
+      Archetype bases pulled down to realistic ranges.  Most archetypes centre
+      79-88%.  Only high_performer sits near 90.  Noise sigma reduced to 3.5.
 
-  Within each 18-week semester:
-    Week  8 = Midterm exam week   (no attendance / assignments / quizzes)
-    Week 18 = Endterm exam week   (no attendance / assignments / quizzes)
-  Weeks 1–7, 9–17 are teaching weeks (16 weeks total per semester).
+  4.  WEEK-TO-WEEK FLUCTUATION: most ±10-20%, volatiles go higher
+      Each student has a volatility score (low/medium/high) from trait_seed.
+      Low-vol students: weekly noise sigma 3-5.
+      High-vol students: sigma 10-14, plus rare "spike weeks" (random.random()
+      < 0.08) where a single week can swing ±20-28 pts.
 
-  sim_state tracks:
-    • current_week  : 1–36 (global week across both semesters)
-                      weeks  1–18 = semester A (the odd sem for each class)
-                      weeks 19–36 = semester B (the even sem for each class)
-    • sim_year      : calendar year the odd semester started
+  5.  SKILL COMPOUNDING
+      Students carry a momentum float that updates each semester based on their
+      previous exam result relative to their archetype baseline.  Good sem → +3
+      to +6 pts added to next sem base.  Bad sem → -2 to -4.  Stored in
+      students table as momentum FLOAT.
 
-  ── Archetype profiles ───────────────────────────────────────────────────────
-  Aligned with dataset.py v3:
-    • Attendance bases raised so most archetypes stay above 75% threshold
-    • Noise sigma tightened (7→4) to prevent random threshold crossings
-    • crisis_student: acute one-semester crash per student, not chronic
-    • slow_fader:     longitudinal score + attendance decay per semester
-    • late_bloomer:   longitudinal improvement across semesters
-    • Grade boundary B = 50–59 (corrected from 55–59)
-    • Exam weeks 8 and 18 (endterm moved from 16 to 18)
-    • No score_pct jitter — exact marks/max*100
+  6.  BURNOUT MECHANICS (lag pattern)
+      Burnout students: quality and library degrade first (weeks 4-8 of burnout
+      sem), attendance follows 3-4 weeks later, grades follow at endterm.
+      Contrast with crisis_student who drops everything at once.
 
-  ── Public API ───────────────────────────────────────────────────────────────
-    advance_week(seed=None)        -> dict   advance DB by one week (1→36)
-    rollback_to_week(target)       -> dict   delete all data beyond target
-    get_db_status()                -> dict   current state snapshot
+  7.  PRIORITY-ABSENT STUDENTS
+      A new archetype priority_absent. These students hold ~75% attendance
+      consistently with low variance — no sudden drops, no spikes.
+      They have other commitments (part-time work, sports, family).
 
-  ── DB schema expectations ───────────────────────────────────────────────────
-  sim_state       : id, current_week, sim_year, last_updated
-  classes         : class_id, year_of_study, odd_sem, even_sem
-  students        : student_id, class_id, archetype, crisis_sem
-                    (crisis_sem = semester number of their crisis, 0 if none)
-  subjects        : subject_id, semester
-  class_subjects  : class_id, subject_id
-  assignment_definitions : assignment_id, class_id, subject_id, due_week,
-                           semester, max_marks
-  quiz_definitions       : quiz_id, class_id, subject_id, scheduled_week,
-                           semester, max_marks
-  exam_schedule          : schedule_id, class_id, subject_id, exam_type,
-                           scheduled_week, semester, max_marks
-  dropout_events  : student_id, class_id, dropout_semester, dropout_reason,
-                    last_active_week
-  attendance      : student_id, class_id, subject_id, semester, week,
-                    week_date, lectures_held, present, absent, late,
-                    attendance_pct
-  assignment_submissions : assignment_id, student_id, class_id, status,
-                           submission_date, latency_hours, marks_obtained,
-                           quality_pct, plagiarism_pct
-  quiz_submissions       : quiz_id, student_id, class_id, attempted,
-                           attempt_date, marks_obtained, score_pct
-  library_visits  : student_id, class_id, semester, week, week_date,
-                    physical_visits
-  book_borrows    : borrow_id, student_id, class_id, semester, book_title,
-                    borrow_date, return_date, borrow_week, return_week
-  exam_results    : schedule_id, student_id, class_id, marks_obtained,
-                    max_marks, score_pct, pass_fail, grade, result_date
+  8.  HARD WORK != GREAT MARKS
+      Two orthogonal traits: effort_score (how hard they work) and
+      efficiency (how well effort converts to marks).  A student can be
+      high-effort/low-efficiency (studies hard, still gets 55%).  Both derived
+      from trait_seed.
 
-  MySQL user: simulator_app
-    SELECT          on all tables
-    INSERT, DELETE  on all transactional tables
-    UPDATE          on sim_state only
+  9.  SEMESTER-TO-SEMESTER PERSONAL DRIFT
+      Each student has a sem_drift drawn once (+/-3 pts) that shifts their base
+      slightly each semester.  No two students drift the same way.
+
+  10. CLASS AND BATCH PERSONALITY
+      Each class has a class_seed (stored in classes table) that determines
+      class-level personality offsets: some classes are naturally higher
+      attendance, some have wider score variance, some submit early.
+
+  11. EXAM CRUNCH: everyone studies more pre-exam
+      Weeks 6-7 (pre-midterm) and weeks 16-17 (pre-endterm): library visits
+      surge, submission latency drops, quiz attempt rate rises.
+      The magnitude scales with the student's effort_score.
+
+  12. PEOPLE CHANGE A BIT SEM-TO-SEM
+      Momentum + drift + sem-boundary resample: each student's weekly base
+      shifts slightly between semesters.
+
+  ── STUDENT ATTRIBUTES (required in students table) ──────────────────────────
+    trait_seed    INT          deterministic RNG seed for all personal offsets
+    dramatic_arc  VARCHAR(20)  'phoenix' / 'collapse' / 'shooting_star' / ''
+    arc_semester  TINYINT      semester where arc activates
+    momentum      FLOAT        running skill momentum, updated after each sem
+
+  ── CLASS ATTRIBUTES (required in classes table) ──────────────────────────────
+    class_seed    INT          class personality seed
+
+  ── PUBLIC API ────────────────────────────────────────────────────────────────
+    advance_week(seed=None)     -> dict
+    rollback_to_week(target)    -> dict
+    get_db_status()             -> dict
 ================================================================================
 """
 
-import sys
-import os
-import random
+import sys, os, random
 from datetime import date, timedelta, datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
 from connection import query, get_conn
 
-# ── SIMULATION CONSTANTS ──────────────────────────────────────────────────────
+# ── CONSTANTS ─────────────────────────────────────────────────────────────────
 WEEKS_PER_SEM      = 18
-TOTAL_WEEKS        = WEEKS_PER_SEM * 2          # 36 weeks per academic year
-MIDTERM_WEEK       = 8                           # within-semester week number
-ENDTERM_WEEK       = 18                          # within-semester week number
+TOTAL_WEEKS        = WEEKS_PER_SEM * 2
+MIDTERM_WEEK       = 8
+ENDTERM_WEEK       = 18
 EXAM_WEEKS         = {MIDTERM_WEEK, ENDTERM_WEEK}
-MIDTERM_RESULT_WEEK = MIDTERM_WEEK + 2           # results 2 weeks after exam
-ENDTERM_RESULT_WEEK = ENDTERM_WEEK + 2           # = week 20, i.e. week 2 of break
-RESULT_DELAY_WEEKS  = 2
+RESULT_DELAY_WEEKS = 2
+PRE_MIDTERM_CRUNCH = {6, 7}
+PRE_ENDTERM_CRUNCH = {16, 17}
+CRUNCH_WEEKS       = PRE_MIDTERM_CRUNCH | PRE_ENDTERM_CRUNCH
 
-# ── YEAR-OF-STUDY → (odd_semester, even_semester) mapping ────────────────────
-YEAR_SEMS = {
-    1: (1, 2),
-    2: (3, 4),
-    3: (5, 6),
-    4: (7, 8),
-}
-
-# ── ARCHETYPE PROFILES (aligned with dataset.py v3) ──────────────────────────
-# attend/sub/lat/qual/plag/qa/qs/lib: base values
-# sem_score_delta  : pts added to exam base per semester elapsed
-# sem_attend_delta : ppts added to attendance base per semester elapsed
-# crisis_attend_drop / crisis_score_drop / crisis_sub_drop: applied in crisis sem
+# ── ARCHETYPE PROFILES ────────────────────────────────────────────────────────
 ARCHETYPES = {
     "high_performer": {
-        "attend": 94, "sub": 96, "lat": -52, "qual": 88,
-        "plag":  2,   "qa": 95, "qs": 87,   "lib": 3.8,
-        "sem_score_delta":  -0.5,
-        "sem_attend_delta": -0.5,
+        "attend": 91, "sub": 94, "lat": -48, "qual": 84,
+        "plag":  2,   "qa": 92, "qs": 83,   "lib": 3.4,
+        "sem_score_delta": -0.5, "sem_attend_delta": -0.4,
     },
     "consistent_avg": {
-        "attend": 86, "sub": 82, "lat": -20, "qual": 68,
-        "plag":  8,   "qa": 74, "qs": 65,   "lib": 1.9,
-        "sem_score_delta":  -0.4,
-        "sem_attend_delta": -0.8,
+        "attend": 85, "sub": 80, "lat": -18, "qual": 65,
+        "plag":  8,   "qa": 72, "qs": 62,   "lib": 1.7,
+        "sem_score_delta": -0.3, "sem_attend_delta": -0.6,
     },
     "late_bloomer": {
-        "attend": 77, "sub": 55, "lat":  -5, "qual": 52,
-        "plag": 12,   "qa": 48, "qs": 45,   "lib": 0.8,
-        "sem_score_delta":  +5.0,
-        "sem_attend_delta": +2.0,
-        "midterm_penalty":  -12,             # low midterm, strong endterm
+        "attend": 76, "sub": 52, "lat":  -4, "qual": 49,
+        "plag": 13,   "qa": 44, "qs": 42,   "lib": 0.7,
+        "sem_score_delta": +4.5, "sem_attend_delta": +1.8,
+        "midterm_penalty": -10,
     },
     "slow_fader": {
-        "attend": 90, "sub": 80, "lat": -22, "qual": 70,
-        "plag":  9,   "qa": 72, "qs": 65,   "lib": 1.6,
-        "sem_score_delta":  -4.5,
-        "sem_attend_delta": -2.5,
+        "attend": 88, "sub": 78, "lat": -20, "qual": 68,
+        "plag":  9,   "qa": 70, "qs": 63,   "lib": 1.5,
+        "sem_score_delta": -4.0, "sem_attend_delta": -2.2,
     },
     "crammer": {
-        "attend": 79, "sub": 52, "lat":  -3, "qual": 58,
-        "plag": 18,   "qa": 38, "qs": 51,   "lib": 0.4,
-        "sem_score_delta":  -0.8,
-        "sem_attend_delta": -0.6,
+        "attend": 78, "sub": 50, "lat":  -2, "qual": 56,
+        "plag": 19,   "qa": 35, "qs": 49,   "lib": 0.3,
+        "sem_score_delta": -0.7, "sem_attend_delta": -0.5,
     },
     "crisis_student": {
-        "attend": 86, "sub": 80, "lat": -22, "qual": 70,
-        "plag":  7,   "qa": 74, "qs": 65,   "lib": 1.8,
-        "sem_score_delta":   -0.4,
-        "sem_attend_delta":  -0.8,
-        "crisis_score_drop":   -38,
-        "crisis_attend_drop":  -35,
-        "crisis_sub_drop":     -40,
+        "attend": 85, "sub": 78, "lat": -20, "qual": 68,
+        "plag":  7,   "qa": 72, "qs": 63,   "lib": 1.7,
+        "sem_score_delta": -0.3, "sem_attend_delta": -0.7,
+        "crisis_score_drop": -36, "crisis_attend_drop": -32, "crisis_sub_drop": -38,
     },
     "silent_disengager": {
-        "attend": 80, "sub": 75, "lat": -14, "qual": 62,
-        "plag": 14,   "qa": 10, "qs": 44,   "lib": 0.1,
-        "sem_score_delta":  -1.0,
-        "sem_attend_delta": -0.8,
+        "attend": 79, "sub": 73, "lat": -12, "qual": 60,
+        "plag": 15,   "qa":  8, "qs": 42,   "lib": 0.1,
+        "sem_score_delta": -0.9, "sem_attend_delta": -0.7,
+    },
+    "burnout_risk": {
+        "attend": 90, "sub": 89, "lat": -42, "qual": 80,
+        "plag":  4,   "qa": 86, "qs": 77,   "lib": 2.6,
+        "sem_score_delta": -7.0, "sem_attend_delta": -4.5,
+        "burnout_sem": 2,
+    },
+    "social_learner": {
+        "attend": 87, "sub": 68, "lat":  -7, "qual": 58,
+        "plag": 17,   "qa": 52, "qs": 51,   "lib": 0.25,
+        "sem_score_delta": -0.4, "sem_attend_delta": -0.2,
+    },
+    "priority_absent": {
+        "attend": 75, "sub": 71, "lat":  -8, "qual": 62,
+        "plag": 11,   "qa": 58, "qs": 55,   "lib": 0.6,
+        "sem_score_delta": -0.4, "sem_attend_delta": -0.1,
     },
 }
 
-# Per-semester cohort-level attendance modifier (class personality drift)
-# Kept small so archetypes stay above the 75% threshold
-CLS_MOD = {1: 2, 2: 3, 3: -1, 4: -2, 5: -4, 6: -3, 7: -6, 8: -8}
+CLS_MOD = {1: 1, 2: 2, 3: -1, 4: -2, 5: -4, 6: -3, 7: -6, 8: -7}
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -181,7 +174,6 @@ def _arc(archetype_str):
     return ARCHETYPES.get(archetype_str, ARCHETYPES["consistent_avg"])
 
 def _score_to_grade(pct):
-    """Corrected boundaries: B=50–59, C=40–49."""
     if pct >= 90: return "O"
     if pct >= 80: return "A+"
     if pct >= 70: return "A"
@@ -191,524 +183,644 @@ def _score_to_grade(pct):
     return "F"
 
 
-def _sem_start(sim_year, semester):
+# ── TRAIT DERIVATION ─────────────────────────────────────────────────────────
+def _get_traits(trait_seed):
     """
-    Return the first Monday of the semester.
-    Odd sems  (1,3,5,7): first Monday of August  in the relevant year
-    Even sems (2,4,6,8): first Monday of January in the relevant year
-
-    sim_year is the year the odd semester started for this academic cycle.
-    E.g. sim_year=2024:
-        Sem 1,3,5,7 start Aug 2024
-        Sem 2,4,6,8 start Jan 2025
+    Derive all per-student personal traits from a single seed.
+    Using an isolated random.Random so the global seed is never disturbed.
     """
-    if semester % 2 == 1:          # odd — August
-        yr, month = sim_year, 8
-    else:                          # even — January next calendar year
-        yr, month = sim_year + 1, 1
+    rng = random.Random(trait_seed)
+    attend_offset = rng.gauss(0, 8)
+    qual_offset   = rng.gauss(0, 8)
+    qs_offset     = rng.gauss(0, 7)
+    qa_offset     = rng.gauss(0, 7)
+    lib_scale     = _clamp(rng.gauss(1.0, 0.20), 0.35, 1.9)
+    sub_offset    = rng.gauss(0, 6)
 
-    # First Monday of the month
-    d = date(yr, month, 1)
-    # weekday(): Monday=0 … Sunday=6
-    days_to_monday = (7 - d.weekday()) % 7
-    return d + timedelta(days=days_to_monday)
+    vol_roll   = rng.random()
+    volatility = "low" if vol_roll < 0.25 else ("high" if vol_roll > 0.80 else "medium")
+
+    exam_bias    = rng.uniform(-12, 12)
+    effort_score = _clamp(rng.gauss(55, 18), 10, 100)
+    efficiency   = _clamp(rng.gauss(55, 18), 10, 100)
+    sem_drift    = rng.gauss(0, 3)
+    adj_curve    = rng.gauss(-3, 10)
+
+    return {
+        "attend_offset": attend_offset,
+        "qual_offset":   qual_offset,
+        "qs_offset":     qs_offset,
+        "qa_offset":     qa_offset,
+        "lib_scale":     lib_scale,
+        "sub_offset":    sub_offset,
+        "volatility":    volatility,
+        "exam_bias":     exam_bias,
+        "effort_score":  effort_score,
+        "efficiency":    efficiency,
+        "sem_drift":     sem_drift,
+        "adj_curve":     adj_curve,
+    }
 
 
-def _week_monday(sem_start_date, week_num):
-    """Monday of week_num (1-indexed) within a semester."""
-    return sem_start_date + timedelta(weeks=week_num - 1)
+def _weekly_sigma(volatility, base_sigma=3.5):
+    if volatility == "low":
+        return base_sigma * 0.7, False
+    if volatility == "medium":
+        return base_sigma, False
+    is_spike = random.random() < 0.08
+    return (base_sigma * 3.0 if is_spike else base_sigma * 1.8), is_spike
 
 
-def _global_to_sem_week(global_week):
+def _effort_to_quality(effort, efficiency, base_qual):
     """
-    Map global simulation week (1–36) to within-semester week (1–18)
-    and which semester slot ('odd' or 'even').
+    Hard work does not guarantee great marks.
+    effort_score  : motivation / hours
+    efficiency    : skill / technique / prior knowledge
+    Returns adjusted quality base.
     """
-    if global_week <= WEEKS_PER_SEM:
-        return global_week, "odd"
-    else:
-        return global_week - WEEKS_PER_SEM, "even"
+    converted = (effort / 100.0) * 0.35 + (efficiency / 100.0) * 0.65
+    offset    = (converted - 0.55) * 30
+    return base_qual + offset
 
 
-def _week_modifiers(sem_week, semester):
+# ── CLASS PERSONALITY ─────────────────────────────────────────────────────────
+def _get_class_personality(class_seed):
+    rng = random.Random(class_seed)
+    return {
+        "attend_bias":  rng.gauss(0, 4),
+        "score_bias":   rng.gauss(0, 3),
+        "sub_bias":     rng.gauss(0, 3),
+        "latency_bias": rng.gauss(0, 8),
+    }
+
+
+# ── CRISIS PHASE ──────────────────────────────────────────────────────────────
+def _crisis_phase(sem_week):
+    if sem_week <= 4:  return 0.25 + (sem_week - 1) * 0.10
+    if sem_week <= 10: return 1.0
+    return max(0.35, 0.55 - (sem_week - 10) * 0.025)
+
+
+# ── BURNOUT LAG ───────────────────────────────────────────────────────────────
+def _burnout_factor(sem_week, trait="quality"):
     """
-    Additive per-week behaviour modifiers based on within-semester week.
-    Exam weeks (8 and 18) are never passed here — callers skip them.
+    Quality/lib/submission degrade from week 4.
+    Attendance lags — starts degrading from week 7.
+    Exam score shows full effect by endterm.
     """
-    m = {"attend": 0, "lat_add": 0.0, "lib_add": 0.0, "quiz_drop": 0}
-    if sem_week == 7:                        # pre-midterm pressure
-        m["lib_add"] += 2.5
-        m["lat_add"] += 6
+    if trait == "quality":
+        return _clamp((sem_week - 3) / 10.0, 0, 1.0) if sem_week >= 4 else 0.0
+    if trait == "attend":
+        return _clamp((sem_week - 6) / 10.0, 0, 0.7) if sem_week >= 7 else 0.0
+    return 0.85  # exam
+
+
+# ── DRAMATIC ARC ──────────────────────────────────────────────────────────────
+def _arc_mod(stu, semester, sem_week, stat):
+    arc, arc_sem = stu.get("dramatic_arc", ""), stu.get("arc_semester", 0)
+    if not arc or not arc_sem:
+        return 0
+    if arc == "phoenix":
+        if semester < arc_sem:
+            return {"attend": -12, "score": -18, "sub": -16, "qa": -22, "qs": -15, "lib": -0.4}.get(stat, 0)
+        return {"attend": +9, "score": +20, "sub": +14, "qa": +25, "qs": +18, "lib": +1.1}.get(stat, 0)
+    if arc == "collapse":
+        if semester < arc_sem: return 0
+        depth = _clamp((sem_week or 8) / 8.0, 0.3, 1.0)
+        return {"attend": -20, "score": -28, "sub": -25, "qa": -32, "qs": -22, "lib": -0.7}.get(stat, 0) * depth
+    if arc == "shooting_star":
+        if semester != arc_sem or not (4 <= (sem_week or 0) <= 14): return 0
+        return {"attend": +7, "score": +16, "sub": +12, "qa": +18, "qs": +14, "lib": +1.3}.get(stat, 0)
+    return 0
+
+
+# ── FIRST-YEAR ADJUSTMENT ─────────────────────────────────────────────────────
+def _y1_adj(stu, semester, year_of_study):
+    """
+    In Y1 sem 1: each student has an adj_curve (can be + or -).
+    Positive: prior knowledge, breezes through.
+    Negative: overwhelmed, struggles.
+    In sem 2: resolves to 0 (adapted).
+    This means sem2 can be better OR worse depending on which direction adj_curve was.
+    """
+    if year_of_study != 1:
+        return 0
+    odd_sem = stu.get("odd_sem", 1)
+    if semester != odd_sem:
+        return 0
+    return _get_traits(stu["trait_seed"])["adj_curve"]
+
+
+# ── WEEK MODIFIERS ────────────────────────────────────────────────────────────
+def _week_mods(sem_week, semester, effort_score=55):
+    m = {"attend": 0, "lat_add": 0.0, "lib_add": 0.0, "qa_boost": 0}
+    en = effort_score / 100.0
+    if sem_week in PRE_MIDTERM_CRUNCH:
+        m["lib_add"] += 1.8 * en + 0.8
+        m["lat_add"] += 5 * en
         m["attend"]  -= 2
-    if sem_week == 9:                        # post-midterm dip
+        m["qa_boost"]+= 12 * en
+    if sem_week == 9:
+        m["attend"]  -= 3
+    if sem_week in PRE_ENDTERM_CRUNCH:
+        m["lib_add"] += 2.5 * en + 1.0
+        m["lat_add"] += 7 * en
+        m["qa_boost"]+= 15 * en
+    if semester >= 5 and 9 <= sem_week <= 14:
         m["attend"]  -= 4
-    if sem_week == 17:                       # pre-endterm pressure
-        m["lib_add"] += 3.0
-        m["lat_add"] += 8
-    if semester >= 5 and 8 <= sem_week <= 13:  # placement season
-        m["attend"]  -= 5
     return m
 
 
-# ── DB READ HELPERS (cursor-based, for use inside transactions) ───────────────
-def _fetch_all(cur, sql, params=()):
-    """Execute a SELECT and return all rows as a list of dicts."""
-    cur.execute(sql, params)
-    columns = [col[0] for col in cur.description]
-    return [dict(zip(columns, row)) for row in cur.fetchall()]
+# ── DATE HELPERS ──────────────────────────────────────────────────────────────
+def _sem_start(sim_year, semester):
+    yr, month = (sim_year, 8) if semester % 2 == 1 else (sim_year + 1, 1)
+    d = date(yr, month, 1)
+    return d + timedelta(days=(7 - d.weekday()) % 7)
 
+def _week_monday(sem_start_date, week_num):
+    return sem_start_date + timedelta(weeks=week_num - 1)
+
+def _global_to_sem_week(global_week):
+    if global_week <= WEEKS_PER_SEM:
+        return global_week, "odd"
+    return global_week - WEEKS_PER_SEM, "even"
+
+
+# ── DB READ HELPERS ───────────────────────────────────────────────────────────
+def _fetch_all(cur, sql, params=()):
+    cur.execute(sql, params)
+    cols = [c[0] for c in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 def _get_sim_state(cur):
-    rows = _fetch_all(cur, "SELECT current_week, sim_year FROM sim_state WHERE id = 1")
-    if not rows:
-        raise RuntimeError("sim_state is empty — run schema SQL and seed data first.")
+    rows = _fetch_all(cur, "SELECT current_week, sim_year FROM sim_state WHERE id=1")
+    if not rows: raise RuntimeError("sim_state empty.")
     return rows[0]
 
-
 def _get_classes(cur):
-    """Return all 4 classes with their year_of_study, odd_sem, even_sem."""
-    return _fetch_all(
-        cur,
-        "SELECT class_id, year_of_study, odd_sem, even_sem FROM classes"
-    )
-
+    return _fetch_all(cur,
+        "SELECT class_id, year_of_study, odd_sem, even_sem, "
+        "COALESCE(class_seed, 1000) AS class_seed FROM classes")
 
 def _get_students(cur, class_id):
-    """
-    Return students for a class.
-    crisis_sem = 0 means no crisis; > 0 = the semester number of their crisis.
-    dropout_* pulled from dropout_events if present.
-    """
-    return _fetch_all(
-        cur,
+    return _fetch_all(cur,
         """SELECT s.student_id, s.archetype,
-                  COALESCE(s.crisis_sem, 0)         AS crisis_sem,
-                  COALESCE(de.dropout_semester, 0)  AS dropout_semester,
-                  COALESCE(de.last_active_week, 0)  AS dropout_last_week
+                  COALESCE(s.crisis_sem,    0)   AS crisis_sem,
+                  COALESCE(s.trait_seed,    0)   AS trait_seed,
+                  COALESCE(s.dramatic_arc, '')   AS dramatic_arc,
+                  COALESCE(s.arc_semester,  0)   AS arc_semester,
+                  COALESCE(s.momentum,    0.0)   AS momentum,
+                  COALESCE(de.dropout_semester,0) AS dropout_semester,
+                  COALESCE(de.last_active_week,0) AS dropout_last_week
            FROM   students s
-           LEFT JOIN dropout_events de
-                  ON s.student_id = de.student_id
-           WHERE  s.class_id = %s""",
-        (class_id,)
-    )
-
+           LEFT JOIN dropout_events de ON s.student_id = de.student_id
+           WHERE  s.class_id = %s""", (class_id,))
 
 def _get_subjects_for_sem(cur, class_id, semester):
-    return _fetch_all(
-        cur,
-        """SELECT s.subject_id
-           FROM   subjects s
-           JOIN   class_subjects cs ON s.subject_id = cs.subject_id
-           WHERE  cs.class_id = %s AND s.semester = %s""",
-        (class_id, semester)
-    )
-
+    return _fetch_all(cur,
+        """SELECT s.subject_id FROM subjects s
+           JOIN class_subjects cs ON s.subject_id = cs.subject_id
+           WHERE cs.class_id=%s AND s.semester=%s""", (class_id, semester))
 
 def _get_assignments_due(cur, class_id, semester, sem_week):
-    """Assignments due in a specific within-semester week."""
-    return _fetch_all(
-        cur,
-        """SELECT assignment_id, subject_id, max_marks
-           FROM   assignment_definitions
-           WHERE  class_id = %s AND semester = %s AND due_week = %s""",
-        (class_id, semester, sem_week)
-    )
-
+    return _fetch_all(cur,
+        """SELECT assignment_id, subject_id, max_marks FROM assignment_definitions
+           WHERE class_id=%s AND semester=%s AND due_week=%s""",
+        (class_id, semester, sem_week))
 
 def _get_active_load(cur, class_id, semester, sem_week):
-    rows = _fetch_all(
-        cur,
+    return _fetch_all(cur,
         """SELECT COUNT(*) AS n FROM assignment_definitions
-           WHERE class_id = %s AND semester = %s AND due_week = %s""",
-        (class_id, semester, sem_week)
-    )
-    return rows[0]["n"]
-
+           WHERE class_id=%s AND semester=%s AND due_week=%s""",
+        (class_id, semester, sem_week))[0]["n"]
 
 def _get_quizzes(cur, class_id, semester, sem_week):
-    return _fetch_all(
-        cur,
-        """SELECT quiz_id, subject_id, max_marks
-           FROM   quiz_definitions
-           WHERE  class_id = %s AND semester = %s AND scheduled_week = %s""",
-        (class_id, semester, sem_week)
-    )
+    return _fetch_all(cur,
+        """SELECT quiz_id, subject_id, max_marks FROM quiz_definitions
+           WHERE class_id=%s AND semester=%s AND scheduled_week=%s""",
+        (class_id, semester, sem_week))
 
-
-def _get_exam_schedule(cur, class_id, semester, exam_sem_week):
-    return _fetch_all(
-        cur,
-        """SELECT schedule_id, subject_id, exam_type, max_marks
-           FROM   exam_schedule
-           WHERE  class_id = %s AND semester = %s AND scheduled_week = %s""",
-        (class_id, semester, exam_sem_week)
-    )
-
+def _get_exam_schedule(cur, class_id, semester, sem_week):
+    return _fetch_all(cur,
+        """SELECT schedule_id, subject_id, exam_type, max_marks FROM exam_schedule
+           WHERE class_id=%s AND semester=%s AND scheduled_week=%s""",
+        (class_id, semester, sem_week))
 
 def _get_assignment_due_date(cur, assignment_id):
-    rows = _fetch_all(
-        cur,
-        "SELECT due_week FROM assignment_definitions WHERE assignment_id = %s",
-        (assignment_id,)
-    )
+    rows = _fetch_all(cur,
+        "SELECT due_week FROM assignment_definitions WHERE assignment_id=%s",
+        (assignment_id,))
     return rows[0]["due_week"] if rows else None
 
-
 def _week_exists(cur, class_id, semester, sem_week):
-    rows = _fetch_all(
-        cur,
+    return _fetch_all(cur,
         """SELECT COUNT(*) AS n FROM attendance
-           WHERE class_id = %s AND semester = %s AND week = %s""",
-        (class_id, semester, sem_week)
-    )
-    return rows[0]["n"] > 0
-
+           WHERE class_id=%s AND semester=%s AND week=%s""",
+        (class_id, semester, sem_week))[0]["n"] > 0
 
 def _is_student_active(stu, semester, sem_week):
-    """
-    Returns True if the student should generate data this week.
-    A dropout stops generating data after their last_active_week
-    in their dropout_semester.
-    """
     dsem = stu["dropout_semester"]
-    if dsem == 0:
-        return True    # not a dropout
-    if semester < dsem:
-        return True    # haven't reached dropout semester yet
-    if semester == dsem and sem_week <= stu["dropout_last_week"]:
-        return True    # still active within the dropout semester
-    return False       # past their dropout point
+    if dsem == 0: return True
+    if semester < dsem: return True
+    if semester == dsem and sem_week <= stu["dropout_last_week"]: return True
+    return False
+
+
+# ── SEM-START CACHE ───────────────────────────────────────────────────────────
+_sem_start_cache = {}
+
+def _sem_start_from_cache(class_id, semester):
+    return _sem_start_cache[(class_id, semester)]
+
+def _populate_sem_start_cache(cur, classes, sim_year):
+    _sem_start_cache.clear()
+    for cls in classes:
+        for sem in (cls["odd_sem"], cls["even_sem"]):
+            _sem_start_cache[(cls["class_id"], sem)] = _sem_start(sim_year, sem)
 
 
 # ── ROW GENERATORS ────────────────────────────────────────────────────────────
 
-def _build_attendance(students, subjects, class_id, semester, sem_week, wdate):
-    """
-    Generate attendance rows for all active students × all subjects.
-    Exam weeks must NOT be passed here (caller filters them out).
-    Noise sigma = 4 (tightened from v1's 7).
-    """
-    ev      = _week_modifiers(sem_week, semester)
-    cls_mod = CLS_MOD.get(semester, 0)
+def _build_attendance(students, subjects, class_id, semester, sem_week,
+                      wdate, year_of_study, cls_p):
     rows    = []
+    cls_mod = CLS_MOD.get(semester, 0)
 
     for stu in students:
-        if not _is_student_active(stu, semester, sem_week):
-            continue
+        if not _is_student_active(stu, semester, sem_week): continue
 
         a          = _arc(stu["archetype"])
-        # Longitudinal: sem_offset = 0 for sem 1, 1 for sem 2, etc.
+        tr         = _get_traits(stu["trait_seed"])
+        ev         = _week_mods(sem_week, semester, tr["effort_score"])
         sem_offset = semester - 1
-        attend_adj = a.get("sem_attend_delta", 0) * sem_offset
         in_crisis  = (stu["crisis_sem"] != 0 and stu["crisis_sem"] == semester)
+        is_dropout = (stu["dropout_semester"] != 0 and stu["dropout_semester"] == semester)
 
-        # Dropout semester: attendance visibly falls as student disengages
-        is_dropout_sem = (stu["dropout_semester"] != 0
-                          and stu["dropout_semester"] == semester)
+        # priority_absent: tightly clamped, low variance, no modifiers
+        if stu["archetype"] == "priority_absent":
+            base = _clamp(a["attend"] + tr["attend_offset"] * 0.3, 68, 82)
+            base = _noisy(base, 2.5, 60, 85)
+            for subj in subjects:
+                lec     = 3
+                present = round(lec * base / 100)
+                late    = 1 if present < lec and random.random() < 0.25 else 0
+                absent  = max(0, lec - present - late)
+                rows.append((stu["student_id"], class_id, subj["subject_id"],
+                              semester, sem_week, str(wdate),
+                              lec, present, absent, late,
+                              round(present / lec * 100, 1)))
+            continue
 
-        base = _clamp(
-            a["attend"] + cls_mod + attend_adj + ev["attend"],
-            10, 100
-        )
+        base = (a["attend"]
+                + tr["attend_offset"]
+                + tr["sem_drift"]
+                + cls_mod
+                + cls_p["attend_bias"]
+                + a.get("sem_attend_delta", 0) * sem_offset
+                + ev["attend"])
+
+        if stu["archetype"] == "crammer" and sem_week in CRUNCH_WEEKS:
+            base += 9
+
         if in_crisis:
-            base += a.get("crisis_attend_drop", 0)
-        if is_dropout_sem:
-            base -= 20
-        if stu["archetype"] == "crammer" and sem_week in (7, 17):
-            base += 8
+            base += a.get("crisis_attend_drop", 0) * _crisis_phase(sem_week)
 
-        base = _noisy(base, 4, 0, 100)   # sigma=4, not 7
+        if stu["archetype"] == "burnout_risk":
+            b_sem = a.get("burnout_sem", 2)
+            if semester >= b_sem:
+                base -= 14 * _burnout_factor(sem_week, "attend")
+
+        if is_dropout:
+            base -= 22
+
+        base += _arc_mod(stu, semester, sem_week, "attend")
+        base += stu.get("momentum", 0) * 0.15
+
+        sigma, _ = _weekly_sigma(tr["volatility"])
+        base     = _noisy(_clamp(base, 10, 100), sigma, 10, 100)
 
         for subj in subjects:
-            lectures = 3
-            s_att    = _clamp(base + random.gauss(0, 5), 0, 100)
-            present  = round(lectures * s_att / 100)
-            late     = 1 if present < lectures and random.random() < 0.3 else 0
-            absent   = max(0, lectures - present - late)
-            rows.append((
-                stu["student_id"], class_id, subj["subject_id"],
-                semester, sem_week, str(wdate),
-                lectures, present, absent, late,
-                round(present / lectures * 100, 1),
-            ))
+            lec     = 3
+            s_att   = _clamp(base + random.gauss(0, 4), 0, 100)
+            present = round(lec * s_att / 100)
+            late    = 1 if present < lec and random.random() < 0.28 else 0
+            absent  = max(0, lec - present - late)
+            rows.append((stu["student_id"], class_id, subj["subject_id"],
+                         semester, sem_week, str(wdate),
+                         lec, present, absent, late,
+                         round(present / lec * 100, 1)))
     return rows
 
 
 def _build_assignment_submissions(cur, students, assignments, class_id,
-                                   semester, sem_week):
-    if not assignments:
-        return []
-    ev          = _week_modifiers(sem_week, semester)
+                                   semester, sem_week, year_of_study, cls_p):
+    if not assignments: return []
     active_load = _get_active_load(cur, class_id, semester, sem_week)
     rows        = []
 
     for stu in students:
-        if not _is_student_active(stu, semester, sem_week):
-            continue
+        if not _is_student_active(stu, semester, sem_week): continue
 
-        a         = _arc(stu["archetype"])
+        a          = _arc(stu["archetype"])
+        tr         = _get_traits(stu["trait_seed"])
+        ev         = _week_mods(sem_week, semester, tr["effort_score"])
         sem_offset = semester - 1
         in_crisis  = (stu["crisis_sem"] != 0 and stu["crisis_sem"] == semester)
 
         for asn in assignments:
-            ws = a["sub"]
-            wl = a["lat"] + ev["lat_add"]
-            wq = a["qual"]
-            wp = a["plag"]
+            ws = (a["sub"] + tr["sub_offset"] + cls_p["sub_bias"]
+                  + a.get("sem_score_delta", 0) * sem_offset * 0.3)
+            wl = a["lat"] + ev["lat_add"] + cls_p["latency_bias"]
 
-            # Longitudinal modifiers
+            base_qual = _effort_to_quality(
+                tr["effort_score"], tr["efficiency"],
+                a["qual"] + tr["qual_offset"] + cls_p["score_bias"])
+
             if stu["archetype"] == "slow_fader":
-                ws -= sem_offset * 3
-                wl += sem_offset * 4
-                wq -= sem_offset * 3
-            if stu["archetype"] == "late_bloomer":
-                ws += sem_offset * 4
-                wl -= sem_offset * 4
-                wq += sem_offset * 5
-            if in_crisis:
-                ws += a.get("crisis_sub_drop", 0)
-            if stu["archetype"] == "crammer":
-                wl += 15
-            if active_load >= 4:
-                wl += 8
+                ws -= sem_offset * 2.5; wl += sem_offset * 4; base_qual -= sem_offset * 2.5
 
-            submitted = random.random() < _clamp(ws, 0, 100) / 100
+            if stu["archetype"] == "late_bloomer":
+                ws += sem_offset * 3.5; wl -= sem_offset * 3.5; base_qual += sem_offset * 4.5
+
+            if stu["archetype"] == "burnout_risk":
+                b_sem = a.get("burnout_sem", 2)
+                if semester >= b_sem:
+                    bf = _burnout_factor(sem_week, "quality")
+                    ws -= 20 * bf; base_qual -= 18 * bf; wl += 15 * bf
+
+            if in_crisis:
+                phase = _crisis_phase(sem_week)
+                ws += a.get("crisis_sub_drop", 0) * phase
+                base_qual -= 15 * phase
+
+            if stu["archetype"] == "crammer":
+                wl += 18
+                if sem_week in CRUNCH_WEEKS: ws += 12; wl -= 10
+
+            if active_load >= 4:
+                wl += 9
+
+            if year_of_study == 1:
+                base_qual += _y1_adj(stu, semester, year_of_study) * 0.6
+
+            base_qual += _arc_mod(stu, semester, sem_week, "sub")
+            base_qual += stu.get("momentum", 0) * 0.25
+
+            submitted = random.random() < _clamp(ws, 5, 99) / 100
             if not submitted:
-                rows.append((
-                    asn["assignment_id"], stu["student_id"], class_id,
-                    "missing", None, None, None, None, 0.0,
-                ))
+                rows.append((asn["assignment_id"], stu["student_id"], class_id,
+                             "missing", None, None, None, None, 0.0))
                 continue
 
-            latency  = _noisy(wl, 12, -120, 48)
-            quality  = _noisy(wq, 10, 15, 100)
+            sigma, _ = _weekly_sigma(tr["volatility"], base_sigma=8)
+            quality  = _noisy(base_qual, sigma, 12, 100)
             marks    = round(asn["max_marks"] * quality / 100)
-            # Exact quality_pct from marks (no jitter)
             q_pct    = round(marks / asn["max_marks"] * 100, 1)
-            plag     = round(_noisy(wp, 8, 0, 80), 1) if random.random() < 0.15 else 0.0
+            latency  = _noisy(wl, 11, -120, 48)
+            plag     = round(_noisy(a["plag"], 7, 0, 75), 1) if random.random() < 0.14 else 0.0
             is_late  = latency > 0
 
             sub_dt = None
             due_wk = _get_assignment_due_date(cur, asn["assignment_id"])
             if due_wk:
                 sem_start = _sem_start_from_cache(class_id, semester)
-                due_date  = _week_monday(sem_start, due_wk)
-                sub_dt    = str(due_date + timedelta(hours=latency))
+                sub_dt    = str(_week_monday(sem_start, due_wk) + timedelta(hours=latency))
 
-            rows.append((
-                asn["assignment_id"], stu["student_id"], class_id,
-                "late" if is_late else "on_time",
-                sub_dt, round(latency, 1),
-                marks, q_pct, plag,
-            ))
+            rows.append((asn["assignment_id"], stu["student_id"], class_id,
+                         "late" if is_late else "on_time",
+                         sub_dt, round(latency, 1), marks, q_pct, plag))
     return rows
 
 
-def _build_quiz_submissions(students, quizzes, class_id, semester, sem_week):
-    if not quizzes:
-        return []
-    ev   = _week_modifiers(sem_week, semester)
+def _build_quiz_submissions(students, quizzes, class_id, semester, sem_week,
+                             year_of_study, cls_p):
+    if not quizzes: return []
     rows = []
 
     for stu in students:
-        if not _is_student_active(stu, semester, sem_week):
-            continue
+        if not _is_student_active(stu, semester, sem_week): continue
 
         a          = _arc(stu["archetype"])
+        tr         = _get_traits(stu["trait_seed"])
+        ev         = _week_mods(sem_week, semester, tr["effort_score"])
         sem_offset = semester - 1
         in_crisis  = (stu["crisis_sem"] != 0 and stu["crisis_sem"] == semester)
 
         for qz in quizzes:
-            wqa = a["qa"] + ev["quiz_drop"]
-            wqs = a["qs"]
+            wqa = (a["qa"] + tr["qa_offset"] + ev["qa_boost"]
+                   + cls_p["sub_bias"] * 0.4)
+            wqs = _effort_to_quality(
+                tr["effort_score"], tr["efficiency"],
+                a["qs"] + tr["qs_offset"] + cls_p["score_bias"] * 0.5)
 
-            if stu["archetype"] == "silent_disengager":
-                wqa -= 60
+            if stu["archetype"] == "silent_disengager": wqa -= 62
             if stu["archetype"] == "slow_fader":
-                wqa -= sem_offset * 5
-                wqs -= sem_offset * 3
+                wqa -= sem_offset * 4; wqs -= sem_offset * 2.5
+            if stu["archetype"] == "burnout_risk":
+                b_sem = a.get("burnout_sem", 2)
+                if semester >= b_sem:
+                    bf = _burnout_factor(sem_week, "quality")
+                    wqa -= 22 * bf; wqs -= 18 * bf
             if in_crisis:
-                wqa -= 50
-                wqs -= 30
+                ph = _crisis_phase(sem_week)
+                wqa -= 48 * ph; wqs -= 28 * ph
             if stu["archetype"] == "late_bloomer":
-                wqa += sem_offset * 8
-                wqs += sem_offset * 6
-            if stu["archetype"] == "crammer" and sem_week in (7, 17):
-                wqa += 35
+                wqa += sem_offset * 7; wqs += sem_offset * 5
+            if stu["archetype"] == "crammer" and sem_week in CRUNCH_WEEKS:
+                wqa += 30; wqs += 8
+            if year_of_study == 1:
+                wqs += _y1_adj(stu, semester, year_of_study) * 0.5
 
-            attempted = random.random() < _clamp(wqa, 0, 100) / 100
-            qdate     = str(datetime.now().date())
+            wqa += _arc_mod(stu, semester, sem_week, "qa")
+            wqs += _arc_mod(stu, semester, sem_week, "qs")
+            wqs += stu.get("momentum", 0) * 0.2
 
+            attempted = random.random() < _clamp(wqa, 2, 99) / 100
             if not attempted:
-                rows.append((
-                    qz["quiz_id"], stu["student_id"], class_id,
-                    0, None, None, None,
-                ))
+                rows.append((qz["quiz_id"], stu["student_id"], class_id,
+                             0, None, None, None))
                 continue
 
-            spct  = _noisy(wqs, 12, 10, 100)
+            sigma, _ = _weekly_sigma(tr["volatility"], base_sigma=10)
+            spct  = _noisy(wqs, sigma, 8, 100)
             marks = round(qz["max_marks"] * spct / 100)
-            # Exact score_pct from marks (no jitter)
             s_pct = round(marks / qz["max_marks"] * 100, 1)
-            rows.append((
-                qz["quiz_id"], stu["student_id"], class_id,
-                1, qdate, marks, s_pct,
-            ))
+            rows.append((qz["quiz_id"], stu["student_id"], class_id,
+                         1, str(datetime.now().date()), marks, s_pct))
     return rows
 
 
-def _build_library_visits(students, class_id, semester, sem_week, wdate):
-    ev   = _week_modifiers(sem_week, semester)
+def _build_library_visits(students, class_id, semester, sem_week, wdate,
+                           year_of_study, cls_p):
     rows = []
 
     for stu in students:
-        if not _is_student_active(stu, semester, sem_week):
-            continue
+        if not _is_student_active(stu, semester, sem_week): continue
 
         a          = _arc(stu["archetype"])
+        tr         = _get_traits(stu["trait_seed"])
+        ev         = _week_mods(sem_week, semester, tr["effort_score"])
         sem_offset = semester - 1
         in_crisis  = (stu["crisis_sem"] != 0 and stu["crisis_sem"] == semester)
-        wlib       = a["lib"] + ev["lib_add"]
+        en         = tr["effort_score"] / 100.0
 
-        if stu["archetype"] == "silent_disengager":
-            wlib = max(0, wlib - 0.8)
+        wlib = a["lib"] * tr["lib_scale"] + ev["lib_add"] * en
+
+        if stu["archetype"] == "silent_disengager": wlib *= 0.15
+        if stu["archetype"] == "social_learner":    wlib *= 0.35
+        if stu["archetype"] == "priority_absent":   wlib *= 0.5
+        if stu["archetype"] == "burnout_risk":
+            b_sem = a.get("burnout_sem", 2)
+            if semester >= b_sem:
+                wlib *= (1 - 0.85 * _burnout_factor(sem_week, "quality"))
         if in_crisis:
-            wlib = 0.0
-        if stu["archetype"] == "crammer" and sem_week in (7, 17):
-            wlib += 3.0
+            wlib *= (1 - 0.88 * _crisis_phase(sem_week))
+        if stu["archetype"] == "crammer" and sem_week in CRUNCH_WEEKS:
+            wlib += 2.8 * en
         if stu["archetype"] == "late_bloomer":
-            wlib += sem_offset * 0.3
+            wlib += sem_offset * 0.28
+        if year_of_study == 1:
+            wlib += max(0, -_y1_adj(stu, semester, year_of_study)) * 0.06
 
-        visits = max(0, round(random.gauss(wlib, 0.8)))
-        rows.append((
-            stu["student_id"], class_id,
-            semester, sem_week, str(wdate), visits,
-        ))
+        wlib += _arc_mod(stu, semester, sem_week, "lib")
+        wlib += stu.get("momentum", 0) * 0.04
+        wlib  = max(0, wlib)
+
+        visits = max(0, round(random.gauss(wlib, 0.7)))
+        rows.append((stu["student_id"], class_id, semester, sem_week, str(wdate), visits))
     return rows
 
 
-def _build_exam_results(students, exams, class_id, semester, result_date):
-    """
-    Build exam result rows.
-    Called at result_week = exam_week + 2.
-    Exact score_pct = marks/max*100, no jitter.
-    Corrected grade boundary: B=50–59.
-    """
-    if not exams:
-        return []
+def _build_exam_results(students, exams, class_id, semester, result_date,
+                         year_of_study, cls_p):
+    if not exams: return []
     cls_mod    = CLS_MOD.get(semester, 0)
     sem_offset = semester - 1
     rows       = []
 
+    BASE_SCORES = {
+        "high_performer":    {"midterm": 84, "endterm": 86},
+        "consistent_avg":    {"midterm": 64, "endterm": 66},
+        "late_bloomer":      {"midterm": 45, "endterm": 62},
+        "slow_fader":        {"midterm": 73, "endterm": 53},
+        "crammer":           {"midterm": 50, "endterm": 64},
+        "crisis_student":    {"midterm": 65, "endterm": 45},
+        "silent_disengager": {"midterm": 55, "endterm": 54},
+        "burnout_risk":      {"midterm": 82, "endterm": 68},
+        "social_learner":    {"midterm": 58, "endterm": 57},
+        "priority_absent":   {"midterm": 60, "endterm": 59},
+    }
+
     for stu in students:
-        # Students who dropped before the exam don't get results
         dsem = stu["dropout_semester"]
         if dsem != 0 and dsem <= semester:
-            # Check if they were active during the actual exam week
-            if dsem < semester:
-                continue
-            # Same dropout semester: only active if dropout_last_week >= exam_week
-            # We can't know exam_week here directly, but exams stores exam_type
-            # We'll filter: if last_active_week < MIDTERM_WEEK, skip all
-            # For simplicity: skip if already dropped
-            if stu["dropout_last_week"] < MIDTERM_WEEK:
-                continue
+            if dsem < semester: continue
+            if stu["dropout_last_week"] < MIDTERM_WEEK: continue
 
         a         = _arc(stu["archetype"])
+        tr        = _get_traits(stu["trait_seed"])
         in_crisis = (stu["crisis_sem"] != 0 and stu["crisis_sem"] == semester)
 
         for ex in exams:
-            exam_type = ex["exam_type"]
+            etype = ex["exam_type"]
+            base  = BASE_SCORES.get(stu["archetype"], {"midterm": 62, "endterm": 62})[etype]
 
-            # Base scores per archetype (same as dataset.py v3)
-            base_map = {
-                "high_performer":    87,
-                "consistent_avg":    67,
-                "late_bloomer":      49 if exam_type == "midterm" else 64,
-                "slow_fader":        75 if exam_type == "midterm" else 55,
-                "crammer":           52 if exam_type == "midterm" else 66,
-                "crisis_student":    67 if exam_type == "midterm" else 47,
-                "silent_disengager": 57,
-            }
-            base = base_map.get(stu["archetype"], 65)
-            base += cls_mod * 0.3
+            # Class and batch
+            base += cls_mod * 0.3 + cls_p["score_bias"] * 0.5
 
-            # Longitudinal score shifts
-            score_adj = a.get("sem_score_delta", 0) * sem_offset
-            base += score_adj
+            # Effort x efficiency (partial effect on exams)
+            base += _effort_to_quality(tr["effort_score"], tr["efficiency"], 0) * 0.5
 
-            # Late bloomer: midterm penalty shrinks as semesters pass
-            if stu["archetype"] == "late_bloomer" and exam_type == "midterm":
-                base -= max(0, 12 - sem_offset * 2)
+            # Midterm vs endterm specialist
+            bias_factor = -0.6 if etype == "midterm" else 0.6
+            base += tr["exam_bias"] * bias_factor
 
-            # Slow fader: endterm decays faster
-            if stu["archetype"] == "slow_fader" and exam_type == "endterm":
-                base -= sem_offset * 3
+            # Longitudinal
+            base += a.get("sem_score_delta", 0) * sem_offset
+            base += stu.get("momentum", 0) * 0.4
+            base += tr["sem_drift"] * 0.5
 
-            # Crisis: acute crash
+            # Archetype-specific
+            if stu["archetype"] == "late_bloomer":
+                if etype == "midterm": base -= max(0, 10 - sem_offset * 2)
+                else:                  base += sem_offset * 1.5
+            if stu["archetype"] == "slow_fader" and etype == "endterm":
+                base -= sem_offset * 2.5
+            if stu["archetype"] == "burnout_risk":
+                b_sem = a.get("burnout_sem", 2)
+                if semester >= b_sem:
+                    drop = 16 if etype == "endterm" else 9
+                    base -= drop * _burnout_factor(14, "exam")
+
+            # Y1 adjustment
+            if year_of_study == 1:
+                base += _y1_adj(stu, semester, year_of_study)
+
+            # Crisis
             if in_crisis:
-                base += a.get("crisis_score_drop", 0)
-                if exam_type == "endterm":
-                    base -= 10
+                ph    = _crisis_phase(16)
+                base += a.get("crisis_score_drop", 0) * ph
+                if etype == "endterm": base -= 10 * ph
 
-            base     = _noisy(base, 9, 10, 100)
+            # Dramatic arc
+            arc_week = ENDTERM_WEEK if etype == "endterm" else MIDTERM_WEEK
+            base += _arc_mod(stu, semester, arc_week, "score")
+
+            # Noise scaled by volatility
+            sigma, _ = _weekly_sigma(tr["volatility"], base_sigma=7.5)
+            base     = _noisy(base, sigma, 8, 100)
             marks    = round(ex["max_marks"] * base / 100)
             pct      = round(marks / ex["max_marks"] * 100, 1)
 
-            rows.append((
-                ex["schedule_id"], stu["student_id"], class_id,
-                marks, ex["max_marks"], pct,
-                "P" if pct >= 40 else "F",
-                _score_to_grade(pct),
-                str(result_date),
-            ))
+            rows.append((ex["schedule_id"], stu["student_id"], class_id,
+                         marks, ex["max_marks"], pct,
+                         "P" if pct >= 40 else "F",
+                         _score_to_grade(pct), str(result_date)))
     return rows
 
 
-# ── SEM-START CACHE (avoid repeated DB hits within a transaction) ─────────────
-_sem_start_cache = {}
+# ── MOMENTUM UPDATE ───────────────────────────────────────────────────────────
+def _update_momentum(cur, class_id, semester):
+    """
+    After endterm: update each student's momentum.
+    Good performance → positive carry-forward.  Bad → small drag.
+    Clamped to [-8, +8] so it never dominates.
+    """
+    results = _fetch_all(cur,
+        """SELECT er.student_id, er.score_pct, s.archetype,
+                  COALESCE(s.momentum, 0.0) AS momentum
+           FROM exam_results er
+           JOIN students s ON er.student_id = s.student_id
+           JOIN exam_schedule es ON er.schedule_id = es.schedule_id
+           WHERE er.class_id=%s AND es.semester=%s AND es.exam_type='endterm'""",
+        (class_id, semester))
 
-def _sem_start_from_cache(class_id, semester):
-    """
-    Return the first Monday of `semester` for the given class.
-    Populated by _populate_sem_start_cache() at the start of each transaction.
-    """
-    return _sem_start_cache[(class_id, semester)]
+    baselines = {
+        "high_performer": 85, "consistent_avg": 65, "late_bloomer": 58,
+        "slow_fader": 63, "crammer": 57, "crisis_student": 55,
+        "silent_disengager": 54, "burnout_risk": 75, "social_learner": 57,
+        "priority_absent": 59,
+    }
 
+    by_stu = {}
+    for r in results:
+        sid = r["student_id"]
+        if sid not in by_stu:
+            by_stu[sid] = {"scores": [], "archetype": r["archetype"],
+                           "old_mom": r["momentum"]}
+        by_stu[sid]["scores"].append(r["score_pct"])
 
-def _populate_sem_start_cache(cur, classes, sim_year):
-    """
-    Pre-populate the sem-start cache for all classes and their semesters.
-    Must be called inside the transaction after sim_state and classes are read.
-    """
-    _sem_start_cache.clear()
-    for cls in classes:
-        for sem in (cls["odd_sem"], cls["even_sem"]):
-            key = (cls["class_id"], sem)
-            _sem_start_cache[key] = _sem_start(sim_year, sem)
+    for sid, d in by_stu.items():
+        avg      = sum(d["scores"]) / len(d["scores"])
+        baseline = baselines.get(d["archetype"], 62)
+        delta    = (avg - baseline) / 10.0
+        new_mom  = _clamp(d["old_mom"] + delta * 0.4, -8, 8)
+        cur.execute("UPDATE students SET momentum=%s WHERE student_id=%s",
+                    (round(new_mom, 3), sid))
 
 
 # ── PUBLIC: ADVANCE WEEK ──────────────────────────────────────────────────────
 def advance_week(seed=None):
-    """
-    Advance the simulation by exactly one global week (1 → 36).
-
-    Global week mapping:
-      Weeks  1–18 → within-semester weeks 1–18 of the ODD semester
-                    (no rows on weeks 8 and 18 — exam-only weeks)
-      Weeks 19–36 → within-semester weeks 1–18 of the EVEN semester
-
-    All 4 classes are advanced simultaneously, mirroring real college calendar.
-
-    Returns:
-      {
-        "global_week": int,        # 1–36
-        "sem_week":    int,        # 1–18 within-semester
-        "semester_slot": str,      # "odd" or "even"
-        "is_exam_week": bool,
-        "classes": { class_id: { table: row_count } }
-      }
-    """
     if seed is not None:
         random.seed(seed)
 
@@ -717,68 +829,52 @@ def advance_week(seed=None):
     cur  = conn.cursor()
 
     try:
-        # ── All reads happen inside the transaction ───────────────────────
-        state       = _get_sim_state(cur)
-        cur_global  = state["current_week"]
-        sim_year    = state["sim_year"]
-        new_global  = cur_global + 1
+        state      = _get_sim_state(cur)
+        cur_global = state["current_week"]
+        sim_year   = state["sim_year"]
+        new_global = cur_global + 1
 
         if new_global > TOTAL_WEEKS:
             raise ValueError(
-                f"Academic year complete — already at global week {cur_global} "
-                f"(max {TOTAL_WEEKS}). Use rollback_to_week(0) to reset."
-            )
+                f"Year complete — at week {cur_global}/{TOTAL_WEEKS}. "
+                "Use rollback_to_week(0) to reset.")
 
         sem_week, slot = _global_to_sem_week(new_global)
         is_exam_week   = sem_week in EXAM_WEEKS
-
-        classes = _get_classes(cur)
-
-        # Pre-populate sem-start cache inside the transaction
+        classes        = _get_classes(cur)
         _populate_sem_start_cache(cur, classes, sim_year)
 
-        summary = {
-            "global_week":   new_global,
-            "sem_week":      sem_week,
-            "semester_slot": slot,
-            "is_exam_week":  is_exam_week,
-            "classes":       {},
-        }
+        summary = {"global_week": new_global, "sem_week": sem_week,
+                   "semester_slot": slot, "is_exam_week": is_exam_week,
+                   "classes": {}}
 
         for cls in classes:
-            class_id   = cls["class_id"]
-            year       = cls["year_of_study"]
-            odd_sem    = cls["odd_sem"]
-            even_sem   = cls["even_sem"]
-            semester   = odd_sem if slot == "odd" else even_sem
+            class_id  = cls["class_id"]
+            year      = cls["year_of_study"]
+            odd_sem   = cls["odd_sem"]
+            even_sem  = cls["even_sem"]
+            semester  = odd_sem if slot == "odd" else even_sem
+            sem_start = _sem_start_from_cache(class_id, semester)
+            wdate     = _week_monday(sem_start, sem_week)
+            cls_p     = _get_class_personality(cls["class_seed"])
 
-            # Each class has its own semester start (already in cache)
-            sem_start  = _sem_start_from_cache(class_id, semester)
-            wdate      = _week_monday(sem_start, sem_week)
-
-            # Skip if this class-semester-week already has data (idempotent)
             if _week_exists(cur, class_id, semester, sem_week):
-                print(f"  [{class_id}] sem {semester} week {sem_week} "
-                      f"already exists — skipping.")
+                print(f"  [{class_id}] sem {semester} wk {sem_week} — skip")
                 continue
 
             students = _get_students(cur, class_id)
-            counts   = {}
+            for stu in students:
+                stu["odd_sem"] = odd_sem   # needed for Y1 adjustment
 
-            # ── EXAM WEEK: no attendance, no assignments, no quizzes ───────
+            counts = {}
+
             if is_exam_week:
-                exam_type     = "midterm" if sem_week == MIDTERM_WEEK else "endterm"
-                result_sem_wk = sem_week + RESULT_DELAY_WEEKS
-
-                print(f"  [{class_id}] Sem {semester} Week {sem_week} "
-                      f"({exam_type.upper()} EXAM — no class data)")
-
-                # Exam results are published RESULT_DELAY_WEEKS later.
-                # We store results immediately when the exam happens (the
-                # result_date field carries the future publication date).
+                etype = "midterm" if sem_week == MIDTERM_WEEK else "endterm"
+                print(f"  [{class_id}] Sem {semester} Wk {sem_week} ({etype.upper()})")
                 exams   = _get_exam_schedule(cur, class_id, semester, sem_week)
-                results = _build_exam_results(students, exams, class_id,
-                                              semester, wdate + timedelta(weeks=RESULT_DELAY_WEEKS))
+                results = _build_exam_results(
+                    students, exams, class_id, semester,
+                    wdate + timedelta(weeks=RESULT_DELAY_WEEKS), year, cls_p)
                 if results:
                     cur.executemany(
                         """INSERT IGNORE INTO exam_results
@@ -786,19 +882,17 @@ def advance_week(seed=None):
                             marks_obtained, max_marks, score_pct,
                             pass_fail, grade, result_date)
                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                        results
-                    )
+                        results)
                     counts["exam_results"] = len(results)
-
+                if etype == "endterm":
+                    _update_momentum(cur, class_id, semester)
                 summary["classes"][class_id] = counts
-                continue   # no further rows for exam week
+                continue
 
-            # ── TEACHING WEEK ─────────────────────────────────────────────
             subjects = _get_subjects_for_sem(cur, class_id, semester)
 
-            # Attendance
-            att = _build_attendance(
-                students, subjects, class_id, semester, sem_week, wdate)
+            att = _build_attendance(students, subjects, class_id, semester,
+                                    sem_week, wdate, year, cls_p)
             if att:
                 cur.executemany(
                     """INSERT IGNORE INTO attendance
@@ -806,14 +900,12 @@ def advance_week(seed=None):
                         week_date, lectures_held, present, absent, late,
                         attendance_pct)
                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    att
-                )
+                    att)
                 counts["attendance"] = len(att)
 
-            # Assignment submissions (for assignments due this week)
             assignments = _get_assignments_due(cur, class_id, semester, sem_week)
             subs = _build_assignment_submissions(
-                cur, students, assignments, class_id, semester, sem_week)
+                cur, students, assignments, class_id, semester, sem_week, year, cls_p)
             if subs:
                 cur.executemany(
                     """INSERT IGNORE INTO assignment_submissions
@@ -821,57 +913,46 @@ def advance_week(seed=None):
                         submission_date, latency_hours, marks_obtained,
                         quality_pct, plagiarism_pct)
                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    subs
-                )
+                    subs)
                 counts["assignment_submissions"] = len(subs)
 
-            # Quiz submissions
             quizzes = _get_quizzes(cur, class_id, semester, sem_week)
-            qzs = _build_quiz_submissions(
-                students, quizzes, class_id, semester, sem_week)
+            qzs = _build_quiz_submissions(students, quizzes, class_id, semester,
+                                          sem_week, year, cls_p)
             if qzs:
                 cur.executemany(
                     """INSERT IGNORE INTO quiz_submissions
                        (quiz_id, student_id, class_id, attempted,
                         attempt_date, marks_obtained, score_pct)
                        VALUES (%s,%s,%s,%s,%s,%s,%s)""",
-                    qzs
-                )
+                    qzs)
                 counts["quiz_submissions"] = len(qzs)
 
-            # Library visits
-            lib = _build_library_visits(
-                students, class_id, semester, sem_week, wdate)
+            lib = _build_library_visits(students, class_id, semester, sem_week,
+                                        wdate, year, cls_p)
             if lib:
                 cur.executemany(
                     """INSERT IGNORE INTO library_visits
                        (student_id, class_id, semester, week,
                         week_date, physical_visits)
                        VALUES (%s,%s,%s,%s,%s,%s)""",
-                    lib
-                )
+                    lib)
                 counts["library_visits"] = len(lib)
 
             summary["classes"][class_id] = counts
 
-        # ── Advance sim_state ─────────────────────────────────────────────
         cur.execute(
-            """UPDATE sim_state
-               SET current_week = %s, last_updated = NOW()
-               WHERE id = 1""",
-            (new_global,)
-        )
-
+            "UPDATE sim_state SET current_week=%s, last_updated=NOW() WHERE id=1",
+            (new_global,))
         conn.commit()
-        print(f"  Global week {new_global} "
-              f"(sem week {sem_week}, {slot} semester) committed.")
+        print(f"  Week {new_global} (sem wk {sem_week}, {slot}) committed.")
 
     except Exception as e:
         conn.rollback()
-        print(f"  ERROR — rolled back. {e}")
+        print(f"  ERROR — rolled back: {e}")
         raise
     finally:
-        _sem_start_cache.clear()   # clear cache after each transaction
+        _sem_start_cache.clear()
         cur.close()
         conn.close()
 
@@ -880,17 +961,6 @@ def advance_week(seed=None):
 
 # ── PUBLIC: ROLLBACK ──────────────────────────────────────────────────────────
 def rollback_to_week(target_week):
-    """
-    Delete all transactional data beyond target_week (global week) and reset
-    sim_state.current_week to target_week.
-
-    target_week = 0 wipes all transactional data (full reset).
-    Wrapped in a single transaction — atomically succeeds or changes nothing.
-
-    Note: exam_results are stored at the exam week (sem weeks 8 and 18 →
-    global weeks 8, 18, 26, 36).  When rolling back we delete results whose
-    exam global week > target_week.
-    """
     if target_week < 0:
         raise ValueError("target_week cannot be negative.")
 
@@ -899,201 +969,105 @@ def rollback_to_week(target_week):
     cur  = conn.cursor()
 
     try:
-        # ── All reads happen inside the transaction ───────────────────────
         state    = _get_sim_state(cur)
         cur_week = state["current_week"]
-
         if target_week >= cur_week:
-            raise ValueError(
-                f"target_week ({target_week}) must be less than "
-                f"current_week ({cur_week})."
-            )
+            raise ValueError(f"target_week ({target_week}) must be < current_week ({cur_week}).")
 
-        print(f"  Rolling back global week {cur_week} → {target_week} ...")
+        print(f"  Rolling back {cur_week} → {target_week} ...")
+        tsw, _ = _global_to_sem_week(max(target_week,1)) if target_week > 0 else (0,"odd")
 
-        # Translate global target_week to within-semester context for each table.
-        # Attendance / library / quizzes / assignments reference (semester, week)
-        # so we need to know which semester weeks become "beyond" the target.
+        def _del(tbl, cond, params=()):
+            cur.execute(f"DELETE FROM {tbl} WHERE {cond}", params)
+            return cur.rowcount
 
-        # Weeks 1–18 → odd sem weeks 1–18; weeks 19–36 → even sem weeks 1–18
-        target_sem_week, target_slot = _global_to_sem_week(max(target_week, 1)) \
-            if target_week > 0 else (0, "odd")
-
-        # ── Attendance ────────────────────────────────────────────────────
-        # Delete rows whose (semester slot, sem_week) are beyond target.
-        # Easier: use the global week translated to (semester, week) pairs.
-        # Since all 4 classes advance together, we can just check week numbers.
         if target_week == 0:
-            cur.execute("DELETE FROM attendance")
+            da  = _del("attendance",            "1=1")
+            dl  = _del("library_visits",        "1=1")
+            db  = _del("book_borrows",          "1=1")
+            cur.execute("DELETE FROM quiz_submissions");       dq = cur.rowcount
+            cur.execute("DELETE FROM assignment_submissions"); ds = cur.rowcount
+            cur.execute("DELETE FROM exam_results");           de = cur.rowcount
         elif target_week < WEEKS_PER_SEM:
-            # Only in odd sems, weeks > target_sem_week
-            cur.execute(
-                """DELETE FROM attendance
-                   WHERE week > %s
-                      OR (week <= %s AND semester IN
-                          (SELECT even_sem FROM classes))""",
-                (target_sem_week, target_sem_week)
-            )
+            da = _del("attendance",
+                "week > %s OR semester IN (SELECT even_sem FROM classes)", (tsw,))
+            dl = _del("library_visits",
+                "week > %s OR semester IN (SELECT even_sem FROM classes)", (tsw,))
+            db = _del("book_borrows",
+                "borrow_week > %s OR semester IN (SELECT even_sem FROM classes)", (tsw,))
+            cur.execute("""DELETE qs FROM quiz_submissions qs
+                JOIN quiz_definitions qd ON qs.quiz_id=qd.quiz_id
+                WHERE qd.scheduled_week > %s
+                   OR qd.semester IN (SELECT even_sem FROM classes)""", (tsw,))
+            dq = cur.rowcount
+            cur.execute("""DELETE sub FROM assignment_submissions sub
+                JOIN assignment_definitions def ON sub.assignment_id=def.assignment_id
+                WHERE def.due_week > %s
+                   OR def.semester IN (SELECT even_sem FROM classes)""", (tsw,))
+            ds = cur.rowcount
         else:
-            # Odd sem is fully committed; delete even-sem weeks > target_sem_week
-            even_sem_week = target_week - WEEKS_PER_SEM
-            cur.execute(
-                """DELETE FROM attendance
-                   WHERE semester IN (SELECT even_sem FROM classes)
-                     AND week > %s""",
-                (even_sem_week,)
-            )
-        deleted_att = cur.rowcount
+            esw = target_week - WEEKS_PER_SEM
+            da = _del("attendance",
+                "semester IN (SELECT even_sem FROM classes) AND week > %s", (esw,))
+            dl = _del("library_visits",
+                "semester IN (SELECT even_sem FROM classes) AND week > %s", (esw,))
+            db = _del("book_borrows",
+                "semester IN (SELECT even_sem FROM classes) AND borrow_week > %s", (esw,))
+            cur.execute("""DELETE qs FROM quiz_submissions qs
+                JOIN quiz_definitions qd ON qs.quiz_id=qd.quiz_id
+                WHERE qd.semester IN (SELECT even_sem FROM classes)
+                  AND qd.scheduled_week > %s""", (esw,))
+            dq = cur.rowcount
+            cur.execute("""DELETE sub FROM assignment_submissions sub
+                JOIN assignment_definitions def ON sub.assignment_id=def.assignment_id
+                WHERE def.semester IN (SELECT even_sem FROM classes)
+                  AND def.due_week > %s""", (esw,))
+            ds = cur.rowcount
 
-        # ── Assignment submissions ─────────────────────────────────────────
-        if target_week == 0:
-            cur.execute("DELETE FROM assignment_submissions")
-        elif target_week < WEEKS_PER_SEM:
-            cur.execute(
-                """DELETE sub FROM assignment_submissions sub
-                   JOIN   assignment_definitions def
-                          ON sub.assignment_id = def.assignment_id
-                   WHERE  def.due_week > %s
-                      OR  (def.semester IN (SELECT even_sem FROM classes))""",
-                (target_sem_week,)
-            )
-        else:
-            even_sem_week = target_week - WEEKS_PER_SEM
-            cur.execute(
-                """DELETE sub FROM assignment_submissions sub
-                   JOIN   assignment_definitions def
-                          ON sub.assignment_id = def.assignment_id
-                   WHERE  def.semester IN (SELECT even_sem FROM classes)
-                     AND  def.due_week > %s""",
-                (even_sem_week,)
-            )
-        deleted_sub = cur.rowcount
-
-        # ── Quiz submissions ───────────────────────────────────────────────
-        if target_week == 0:
-            cur.execute("DELETE FROM quiz_submissions")
-        elif target_week < WEEKS_PER_SEM:
-            cur.execute(
-                """DELETE qs FROM quiz_submissions qs
-                   JOIN   quiz_definitions qd ON qs.quiz_id = qd.quiz_id
-                   WHERE  qd.scheduled_week > %s
-                      OR  (qd.semester IN (SELECT even_sem FROM classes))""",
-                (target_sem_week,)
-            )
-        else:
-            even_sem_week = target_week - WEEKS_PER_SEM
-            cur.execute(
-                """DELETE qs FROM quiz_submissions qs
-                   JOIN   quiz_definitions qd ON qs.quiz_id = qd.quiz_id
-                   WHERE  qd.semester IN (SELECT even_sem FROM classes)
-                     AND  qd.scheduled_week > %s""",
-                (even_sem_week,)
-            )
-        deleted_qz = cur.rowcount
-
-        # ── Library visits ─────────────────────────────────────────────────
-        if target_week == 0:
-            cur.execute("DELETE FROM library_visits")
-        elif target_week < WEEKS_PER_SEM:
-            cur.execute(
-                """DELETE FROM library_visits
-                   WHERE week > %s
-                      OR semester IN (SELECT even_sem FROM classes)""",
-                (target_sem_week,)
-            )
-        else:
-            even_sem_week = target_week - WEEKS_PER_SEM
-            cur.execute(
-                """DELETE FROM library_visits
-                   WHERE semester IN (SELECT even_sem FROM classes)
-                     AND week > %s""",
-                (even_sem_week,)
-            )
-        deleted_lib = cur.rowcount
-
-        # ── Book borrows ───────────────────────────────────────────────────
-        if target_week == 0:
-            cur.execute("DELETE FROM book_borrows")
-        elif target_week < WEEKS_PER_SEM:
-            cur.execute(
-                """DELETE FROM book_borrows
-                   WHERE borrow_week > %s
-                      OR semester IN (SELECT even_sem FROM classes)""",
-                (target_sem_week,)
-            )
-        else:
-            even_sem_week = target_week - WEEKS_PER_SEM
-            cur.execute(
-                """DELETE FROM book_borrows
-                   WHERE semester IN (SELECT even_sem FROM classes)
-                     AND borrow_week > %s""",
-                (even_sem_week,)
-            )
-        deleted_brw = cur.rowcount
-
-        # ── Exam results ───────────────────────────────────────────────────
-        # Exam results stored at global weeks 8, 18, 26, 36 (exam weeks).
-        # Delete results for any exam whose global week > target_week.
-        if target_week == 0:
-            cur.execute("DELETE FROM exam_results")
-        elif target_week < MIDTERM_WEEK:
-            cur.execute("DELETE FROM exam_results")
+        # Exam results
+        if target_week == 0 or target_week < MIDTERM_WEEK:
+            cur.execute("DELETE FROM exam_results"); de = cur.rowcount
         elif target_week < ENDTERM_WEEK:
-            # Keep only midterm (odd sem week 8); delete endterm and even sem
-            cur.execute(
-                """DELETE er FROM exam_results er
-                   JOIN   exam_schedule es ON er.schedule_id = es.schedule_id
-                   WHERE  es.exam_type = 'endterm'
-                      OR  es.semester IN (SELECT even_sem FROM classes)"""
-            )
+            cur.execute("""DELETE er FROM exam_results er
+                JOIN exam_schedule es ON er.schedule_id=es.schedule_id
+                WHERE es.exam_type='endterm'
+                   OR es.semester IN (SELECT even_sem FROM classes)""")
+            de = cur.rowcount
         elif target_week < WEEKS_PER_SEM + MIDTERM_WEEK:
-            # Odd sem complete; delete even sem results
-            cur.execute(
-                """DELETE er FROM exam_results er
-                   JOIN   exam_schedule es ON er.schedule_id = es.schedule_id
-                   WHERE  es.semester IN (SELECT even_sem FROM classes)"""
-            )
+            cur.execute("""DELETE er FROM exam_results er
+                JOIN exam_schedule es ON er.schedule_id=es.schedule_id
+                WHERE es.semester IN (SELECT even_sem FROM classes)""")
+            de = cur.rowcount
         elif target_week < WEEKS_PER_SEM + ENDTERM_WEEK:
-            # Even sem midterm done; delete even sem endterm only
-            cur.execute(
-                """DELETE er FROM exam_results er
-                   JOIN   exam_schedule es ON er.schedule_id = es.schedule_id
-                   WHERE  es.semester IN (SELECT even_sem FROM classes)
-                     AND  es.exam_type = 'endterm'"""
-            )
-        # else: target_week >= 36 — nothing to delete
-        deleted_ex = cur.rowcount
+            cur.execute("""DELETE er FROM exam_results er
+                JOIN exam_schedule es ON er.schedule_id=es.schedule_id
+                WHERE es.semester IN (SELECT even_sem FROM classes)
+                  AND es.exam_type='endterm'""")
+            de = cur.rowcount
+        else:
+            de = 0
 
-        # ── Update sim_state ──────────────────────────────────────────────
+        # Reset momentum when rolling back past endterm
+        if target_week < ENDTERM_WEEK:
+            cur.execute("UPDATE students SET momentum=0.0")
+
         cur.execute(
-            "UPDATE sim_state SET current_week = %s, last_updated = NOW() WHERE id = 1",
-            (target_week,)
-        )
-
+            "UPDATE sim_state SET current_week=%s, last_updated=NOW() WHERE id=1",
+            (target_week,))
         conn.commit()
 
-        result = {
-            "from_week": cur_week,
-            "to_week":   target_week,
-            "deleted": {
-                "attendance":             deleted_att,
-                "assignment_submissions": deleted_sub,
-                "quiz_submissions":       deleted_qz,
-                "library_visits":         deleted_lib,
-                "book_borrows":           deleted_brw,
-                "exam_results":           deleted_ex,
-            }
-        }
-        print(f"  Rollback complete.")
+        result = {"from_week": cur_week, "to_week": target_week,
+                  "deleted": {"attendance": da, "assignment_submissions": ds,
+                               "quiz_submissions": dq, "library_visits": dl,
+                               "book_borrows": db, "exam_results": de}}
+        print(f"  Rollback complete to week {target_week}")
         for tbl, n in result["deleted"].items():
-            if n:
-                print(f"    {tbl:<28} {n} rows deleted")
-        print(f"    sim_state reset to global week {target_week}")
+            if n: print(f"    {tbl:<28} {n} rows deleted")
         return result
 
     except Exception as e:
         conn.rollback()
-        print(f"  ERROR — nothing was changed. {e}")
+        print(f"  ERROR — nothing changed: {e}")
         raise
     finally:
         _sem_start_cache.clear()
@@ -1103,73 +1077,44 @@ def rollback_to_week(target_week):
 
 # ── PUBLIC: STATUS ────────────────────────────────────────────────────────────
 def get_db_status():
-    """
-    Return a snapshot of the current simulation state.
-    Used by the Streamlit UI status panel.
-    Reads are non-transactional (read-only snapshot, no writes needed).
-    """
-    state      = query("SELECT current_week, sim_year FROM sim_state WHERE id = 1")[0]
-    global_wk  = state["current_week"]
-    sim_year   = state["sim_year"]
-
-    sem_week, slot = _global_to_sem_week(max(global_wk, 1)) \
-        if global_wk > 0 else (0, "odd")
-    is_exam    = sem_week in EXAM_WEEKS
-
-    classes    = query("SELECT class_id, year_of_study, odd_sem, even_sem FROM classes")
-    events     = []
-    row_counts = {}
+    state     = query("SELECT current_week, sim_year FROM sim_state WHERE id=1")[0]
+    global_wk = state["current_week"]
+    sim_year  = state["sim_year"]
+    sem_week, slot = _global_to_sem_week(max(global_wk,1)) if global_wk > 0 else (0,"odd")
+    is_exam   = sem_week in EXAM_WEEKS
+    classes   = query("SELECT class_id, year_of_study, odd_sem, even_sem FROM classes")
+    events, row_counts = [], {}
 
     for cls in classes:
         cid      = cls["class_id"]
-        odd_sem  = cls["odd_sem"]
-        even_sem = cls["even_sem"]
-        semester = odd_sem if slot == "odd" else even_sem
+        semester = cls["odd_sem"] if slot == "odd" else cls["even_sem"]
 
-        sem_start = _sem_start(sim_year, semester)
-        wdate     = _week_monday(sem_start, sem_week) if sem_week > 0 else None
+        if sem_week > 0:
+            asn_n = query("SELECT COUNT(*) AS n FROM assignment_definitions "
+                          "WHERE class_id=%s AND semester=%s AND due_week=%s",
+                          (cid, semester, sem_week))[0]["n"]
+            qz_n  = query("SELECT COUNT(*) AS n FROM quiz_definitions "
+                          "WHERE class_id=%s AND semester=%s AND scheduled_week=%s",
+                          (cid, semester, sem_week))[0]["n"]
+        else:
+            asn_n = qz_n = 0
 
-        # What's scheduled at this week
-        asn_n = query(
-            """SELECT COUNT(*) AS n FROM assignment_definitions
-               WHERE class_id=%s AND semester=%s AND due_week=%s""",
-            (cid, semester, sem_week)
-        )[0]["n"] if sem_week > 0 else 0
-
-        qz_n = query(
-            """SELECT COUNT(*) AS n FROM quiz_definitions
-               WHERE class_id=%s AND semester=%s AND scheduled_week=%s""",
-            (cid, semester, sem_week)
-        )[0]["n"] if sem_week > 0 else 0
-
-        ex_n = query(
-            """SELECT COUNT(*) AS n FROM exam_schedule
-               WHERE class_id=%s AND semester=%s AND scheduled_week=%s""",
-            (cid, semester, sem_week)
-        )[0]["n"] if is_exam else 0
+        ex_n = query("SELECT COUNT(*) AS n FROM exam_schedule "
+                     "WHERE class_id=%s AND semester=%s AND scheduled_week=%s",
+                     (cid, semester, sem_week))[0]["n"] if is_exam else 0
 
         if asn_n: events.append(f"{cid} (sem {semester}): {asn_n} assignment(s) due")
         if qz_n:  events.append(f"{cid} (sem {semester}): {qz_n} quiz(zes)")
-        if ex_n:  events.append(f"{cid} (sem {semester}): {'MIDTERM' if sem_week==MIDTERM_WEEK else 'ENDTERM'} EXAM")
+        if ex_n:  events.append(
+            f"{cid} (sem {semester}): "
+            f"{'MIDTERM' if sem_week==MIDTERM_WEEK else 'ENDTERM'} EXAM")
 
-        # Row counts for this class
         row_counts[cid] = {
-            "attendance": query(
-                "SELECT COUNT(*) AS n FROM attendance WHERE class_id=%s", (cid,)
-            )[0]["n"],
-            "assignment_submissions": query(
-                """SELECT COUNT(*) AS n FROM assignment_submissions
-                   WHERE class_id=%s""", (cid,)
-            )[0]["n"],
-            "quiz_submissions": query(
-                "SELECT COUNT(*) AS n FROM quiz_submissions WHERE class_id=%s", (cid,)
-            )[0]["n"],
-            "exam_results": query(
-                "SELECT COUNT(*) AS n FROM exam_results WHERE class_id=%s", (cid,)
-            )[0]["n"],
+            "attendance":             query("SELECT COUNT(*) AS n FROM attendance WHERE class_id=%s",(cid,))[0]["n"],
+            "assignment_submissions": query("SELECT COUNT(*) AS n FROM assignment_submissions WHERE class_id=%s",(cid,))[0]["n"],
+            "quiz_submissions":       query("SELECT COUNT(*) AS n FROM quiz_submissions WHERE class_id=%s",(cid,))[0]["n"],
+            "exam_results":           query("SELECT COUNT(*) AS n FROM exam_results WHERE class_id=%s",(cid,))[0]["n"],
         }
-
-    _sem_start_cache.clear()
 
     return {
         "global_week":            global_wk,

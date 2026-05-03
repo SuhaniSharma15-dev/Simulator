@@ -56,7 +56,7 @@ def _trigger_calibration():
 
     try:
         resp = requests.post(
-            f"{url}/calibrate",
+            f"{url}/calibrate/",
             headers={"X-Internal-Secret": secret or ""},
             timeout=120,   # multi-week jumps can take a while
         )

@@ -36,46 +36,52 @@ if "confirm_rollback" not in st.session_state:
 
 
 # ── CALIBRATION TRIGGER ───────────────────────────────────────────────────────
-def _trigger_calibration():
-    """
-    POST to the calibrate Flask service on the analysis Railway service.
-    Blocks until calibrate() has fully committed — st.rerun() is only called
-    after this returns, so the UI always reflects up-to-date analysis data.
+import time
 
-    On failure (service down, timeout, etc.) a warning is shown but the
-    simulator keeps working — the analysis DB will just be behind until
-    the next successful trigger.
-    """
+def _trigger_calibration():
     url    = os.getenv("CALIBRATE_SERVICE_URL")
     secret = os.getenv("INTERNAL_SECRET")
 
     if not url:
-        # Local dev without the analysis service running — skip silently.
         add_log("Calibration skipped (CALIBRATE_SERVICE_URL not set).", log_type="system")
         return None
 
     try:
-        resp = requests.post(
+        requests.post(
             f"{url}/calibrate/",
             headers={"X-Internal-Secret": secret or ""},
-            timeout=120,   # multi-week jumps can take a while
+            timeout=10,
         )
-        resp.raise_for_status()
-        result = resp.json()
-        action = result.get("action", "unknown")
-        weeks  = result.get("weeks_processed", 0)
-        ms     = result.get("elapsed_ms", 0)
-        add_log(
-            f"Analysis DB calibrated — {action}"
-            + (f", {weeks} week(s) processed" if weeks else "")
-            + f"  ({ms} ms)",
-            log_type="system",
-        )
-        return result
-    except requests.exceptions.Timeout:
-        st.warning("Calibration service timed out — analysis DB may be behind.")
-        add_log("Calibration timed out.", log_type="system")
+
+        deadline = time.time() + 300
+        while time.time() < deadline:
+            r = requests.get(
+                f"{url}/calibrate/status/",
+                headers={"X-Internal-Secret": secret or ""},
+                timeout=10,
+            ).json()
+
+            if not r["running"]:
+                if r["error"]:
+                    add_log(f"Calibration failed: {r['error']}", log_type="system")
+                    return None
+                result = r["result"]
+                action = result.get("action", "unknown")
+                weeks  = result.get("weeks_processed", 0)
+                ms     = result.get("elapsed_ms", 0)
+                add_log(
+                    f"Analysis DB calibrated — {action}"
+                    + (f", {weeks} week(s) processed" if weeks else "")
+                    + f"  ({ms} ms)",
+                    log_type="system",
+                )
+                return result
+
+            time.sleep(3)
+
+        add_log("Calibration timed out after 5 min.", log_type="system")
         return None
+
     except Exception as e:
         st.warning(f"Calibration service unreachable: {e}")
         add_log(f"Calibration failed: {e}", log_type="system")
